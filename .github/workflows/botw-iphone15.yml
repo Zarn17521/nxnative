@@ -60,7 +60,7 @@ jobs:
           "$PY_BASE" -m venv "$VENV"
           PY="$VENV/bin/python"
           "$PY" -m pip install --upgrade pip
-          "$PY" -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic gdown
+          "$PY" -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic gdown backports.zstd
           echo "PYTHON=$PY" >> "$GITHUB_ENV"
 
       - name: Download BOTW game, update and keys from Google Drive
