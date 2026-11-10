@@ -53,7 +53,10 @@ jobs:
         run: |
           set -euo pipefail
           brew install xcodegen zstd glslang python@3.13
-          PY="$(brew --prefix python@3.13)/bin/python3.13"
+          PY_BASE="$(brew --prefix python@3.13)/bin/python3.13"
+          VENV="$RUNNER_TEMP/botw-python-venv"
+          "$PY_BASE" -m venv "$VENV"
+          PY="$VENV/bin/python"
           "$PY" -m pip install --upgrade pip
           "$PY" -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic gdown
           echo "PYTHON=$PY" >> "$GITHUB_ENV"
