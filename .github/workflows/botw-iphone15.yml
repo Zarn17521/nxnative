@@ -75,7 +75,7 @@ jobs:
             local output="$2"
             case "$url" in
               *drive.google.com*)
-                "$PYTHON" -m gdown --fuzzy "$url" -O "$output"
+                "$PYTHON" -m gdown "$url" -O "$output"
                 ;;
               https://*)
                 curl --fail --location --retry 5 --retry-delay 3 "$url" -o "$output"
