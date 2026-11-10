@@ -11,7 +11,7 @@ on:
         description: "Google Drive/direct download URL for BOTW 1.9.0 update NSP"
         required: true
         type: string
-      keys_url:
+      keys_Url:
         description: "Google Drive/direct download URL for prod.keys"
         required: true
         type: string
@@ -62,7 +62,7 @@ jobs:
         env:
           GAME_URL: \${{ inputs.game_url }}
           UPDATE_URL: \${{ inputs.update_url }}
-          KEYS_URL: \${{ inputs.keys_url }}
+          KEYS_URL: \${{ inputs.keys_Url }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/botw-input" "$RUNNER_TEMP/botw-output"
@@ -159,7 +159,7 @@ jobs:
           retention-days: 1
 
       - name: Upload RomFS part AB
-        if: \${{ hashFiles('') == '' || always() }}
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: BOTW-RomFS-AB
