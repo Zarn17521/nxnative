@@ -1,8 +1,6 @@
 name: BOTW iPhone 15 IPA
 
 on:
-  push:
-    branches: [no-bc]
   workflow_dispatch:
 
 permissions:
@@ -132,12 +130,24 @@ jobs:
             --progress lines
           test -s "$RUNNER_TEMP/botw-output/BOTW-1.9.0-iPhone15.ipa"
 
-      - name: Prepare iPhone 15 runtime settings
+      - name: Prepare and verify IPA and RomFS outputs
         run: |
+          set -euo pipefail
           cat > "$RUNNER_TEMP/botw-output/Documents-env.txt" <<'EOF'
           DM_RENDER_SCALE=0.5
           DM_FPS_TARGET=30
           EOF
+
+          ROMFS_IMAGE="$INPUT_DIR/${TITLE_ID}_build/extract/${PACKAGE_VERSION}/RomFS.img"
+          if [[ ! -s "$ROMFS_IMAGE" ]]; then
+            echo "::error::Expected RomFS image was not found: $ROMFS_IMAGE"
+            echo "Available extracted image files:"
+            find "$INPUT_DIR/${TITLE_ID}_build/extract" -maxdepth 3 -name 'RomFS.img' -type f -print 2>/dev/null || true
+            exit 1
+          fi
+          echo "Verified build outputs:"
+          ls -lh "$RUNNER_TEMP/botw-output/BOTW-1.9.0-iPhone15.ipa" "$ROMFS_IMAGE"
+          echo "ROMFS_IMAGE=$ROMFS_IMAGE" >> "$GITHUB_ENV"
 
       - name: Upload unsigned IPA and runtime settings
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -148,7 +158,16 @@ jobs:
             ${{ runner.temp }}/botw-output/Documents-env.txt
           if-no-files-found: error
           compression-level: 0
-          retention-days: 1
+          retention-days: 3
+
+      - name: Upload RomFS image
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: BOTW-1.9.0-RomFS-img
+          path: ${{ env.ROMFS_IMAGE }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
 
       - name: Upload build logs if failed
         if: failure()
