@@ -4,19 +4,6 @@ on:
   push:
     branches: [no-bc]
   workflow_dispatch:
-    inputs:
-      game_url:
-        description: "Optional fallback: Google Drive/direct download URL for BOTW base game NSP (repository secret is preferred)"
-        required: false
-        type: string
-      update_url:
-        description: "Optional fallback: Google Drive/direct download URL for BOTW update NSP (repository secret is preferred)"
-        required: false
-        type: string
-      keys_Url:
-        description: "Optional fallback: Google Drive/direct download URL for prod.keys (repository secret is preferred)"
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -63,14 +50,21 @@ jobs:
           "$PY" -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic gdown backports.zstd
           echo "PYTHON=$PY" >> "$GITHUB_ENV"
 
-      - name: Download BOTW game, update and keys from Google Drive
+      - name: Download BOTW game, update and keys from GitHub Secrets
         env:
-          GAME_URL: ${{ secrets.BOTW_BASE_URL || inputs.game_url }}
-          UPDATE_URL: ${{ secrets.BOTW_UPDATE_URL || inputs.update_url }}
-          KEYS_URL: ${{ secrets.BOTW_PROD_KEYS_URL || inputs.keys_Url }}
+          GAME_URL: ${{ secrets.BOTW_BASE_URL }}
+          UPDATE_URL: ${{ secrets.BOTW_UPDATE_URL }}
+          KEYS_URL: ${{ secrets.BOTW_PROD_KEYS_URL }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/botw-input" "$RUNNER_TEMP/botw-output"
+
+          for name in GAME_URL UPDATE_URL KEYS_URL; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::$name secret is empty or missing. Configure BOTW_BASE_URL, BOTW_UPDATE_URL and BOTW_PROD_KEYS_URL in repository Actions secrets."
+              exit 1
+            fi
+          done
 
           download_file() {
             local url="$1"
