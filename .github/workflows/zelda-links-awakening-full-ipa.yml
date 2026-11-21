@@ -67,11 +67,21 @@ jobs:
           PY
 
       - name: Build with unmodified fork defaults (include RomFS)
+        id: build
         shell: bash
         run: |
           set -euo pipefail
           python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/zelda-input" \
             -k "$RUNNER_TEMP/zelda-keys/prod.keys"
+
+      - name: Upload full IPA (even if verification fails)
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZeldaLinksAwakening-NoBC-FullIPA
+          path: ${{ runner.temp }}/zelda-input/ZeldaLinksAwakening.ipa
+          if-no-files-found: error
+          retention-days: 3
 
       - name: Verify IPA and game data
         shell: bash
@@ -94,10 +104,3 @@ jobs:
           PY
           ls -lh "$IPA"
 
-      - name: Upload full IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: ZeldaLinksAwakening-NoBC-FullIPA
-          path: ${{ runner.temp }}/zelda-input/ZeldaLinksAwakening.ipa
-          if-no-files-found: error
-          retention-days: 3
