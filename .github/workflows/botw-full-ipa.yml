@@ -1,0 +1,106 @@
+name: BOTW No-BC Full IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-botw-ipa:
+    name: Build BOTW 1.9.0 all-in-one IPA
+    runs-on: xcode-27
+    timeout-minutes: 360
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      GAME: "01007EF00011E000"
+      BASE_URL: ${{ secrets.BOTW_BASE_URL }}
+      UPDATE_URL: ${{ secrets.BOTW_UPDATE_URL }}
+      KEYS_URL: ${{ secrets.BOTW_KEYS_URL }}
+    steps:
+      - name: Checkout original No-BC fork
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$BASE_URL" || { echo "::error::Missing BOTW_BASE_URL"; exit 1; }
+          test -n "$UPDATE_URL" || { echo "::error::Missing BOTW_UPDATE_URL"; exit 1; }
+          test -n "$KEYS_URL" || { echo "::error::Missing BOTW_KEYS_URL"; exit 1; }
+          test -f "dm/games/$GAME/game.tsv"
+          grep -q $'package\tv1114112' "dm/games/$GAME/game.tsv"
+
+      - name: Install original build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -downloadComponent MetalToolchain
+          command -v xcodegen || brew install xcodegen
+          brew list zstd >/dev/null 2>&1 || brew install zstd
+          brew list glslang >/dev/null 2>&1 || brew install glslang
+          python3 -m venv "$RUNNER_TEMP/botw-venv"
+          "$RUNNER_TEMP/botw-venv/bin/python" -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic gdown
+          echo "$RUNNER_TEMP/botw-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Download owned NSPs and keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/botw-input" "$RUNNER_TEMP/botw-keys"
+          chmod 700 "$RUNNER_TEMP/botw-keys"
+          python3 - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"])
+          for env, dest in [
+              ("BASE_URL", root / "botw-input" / "BOTW [01007EF00011E000][v0].nsp"),
+              ("UPDATE_URL", root / "botw-input" / "BOTW [01007EF00011E800][v1114112].nsp"),
+              ("KEYS_URL", root / "botw-keys" / "prod.keys"),
+          ]:
+              subprocess.run(["gdown", "--output", str(dest), os.environ[env]], check=True)
+              if not dest.is_file() or dest.stat().st_size == 0:
+                  raise RuntimeError(f"Download failed: {env}")
+          (root / "botw-keys" / "prod.keys").chmod(0o600)
+          PY
+
+      - name: Build with unmodified fork defaults (include RomFS)
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/botw-input" \
+            -k "$RUNNER_TEMP/botw-keys/prod.keys"
+
+      - name: Upload full IPA (even if verification fails)
+        if: ${{ always() && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZeldaBreathOfTheWild-NoBC-FullIPA
+          path: ${{ runner.temp }}/botw-input/ZeldaBreathOfTheWild.ipa
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Verify IPA and game data
+        shell: bash
+        run: |
+          set -euo pipefail
+          IPA="$RUNNER_TEMP/botw-input/ZeldaBreathOfTheWild.ipa"
+          test -s "$IPA"
+          python3 - "$IPA" <<'PY'
+          import sys, zipfile
+          ipa = sys.argv[1]
+          with zipfile.ZipFile(ipa) as archive:
+              names = archive.namelist()
+              apps = {name.split("/")[1] for name in names if name.startswith("Payload/") and ".app/" in name}
+              game_data = [name for name in names if name.startswith("Payload/") and ("/romfs/" in name or name.endswith("/romfs.img"))]
+              if not apps:
+                  raise SystemExit("IPA verification failed: no Payload app")
+              if not game_data:
+                  raise SystemExit("IPA verification failed: no RomFS files or image")
+              print(f"IPA verified: {len(names)} entries, {len(game_data)} RomFS entries")
+          PY
+          ls -lh "$IPA"
+
