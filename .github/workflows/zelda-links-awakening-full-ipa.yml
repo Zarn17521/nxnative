@@ -79,7 +79,19 @@ jobs:
           set -euo pipefail
           IPA="$RUNNER_TEMP/zelda-input/ZeldaLinksAwakening.ipa"
           test -s "$IPA"
-          unzip -Z1 "$IPA" | grep -qE '^Payload/[^/]+\.app/romfs/'
+          python3 - "$IPA" <<'PY'
+          import sys, zipfile
+          ipa = sys.argv[1]
+          with zipfile.ZipFile(ipa) as archive:
+              names = archive.namelist()
+              apps = {name.split("/")[1] for name in names if name.startswith("Payload/") and ".app/" in name}
+              game_data = [name for name in names if name.startswith("Payload/") and ("/romfs/" in name or name.endswith("/romfs.img"))]
+              if not apps:
+                  raise SystemExit("IPA verification failed: no Payload app")
+              if not game_data:
+                  raise SystemExit("IPA verification failed: no RomFS files or image")
+              print(f"IPA verified: {len(names)} entries, {len(game_data)} RomFS entries")
+          PY
           ls -lh "$IPA"
 
       - name: Upload full IPA
