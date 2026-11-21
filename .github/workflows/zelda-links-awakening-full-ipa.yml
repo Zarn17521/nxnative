@@ -60,7 +60,7 @@ jobs:
               ("UPDATE_URL", root / "zelda-input" / "Zelda [01006BB00C6F0800][v131072].nsp"),
               ("KEYS_URL", root / "zelda-keys" / "prod.keys"),
           ]:
-              subprocess.run(["gdown", "--fuzzy", "--output", str(dest), os.environ[env]], check=True)
+              subprocess.run(["gdown", "--output", str(dest), os.environ[env]], check=True)
               if not dest.is_file() or dest.stat().st_size == 0:
                   raise RuntimeError(f"Download failed: {env}")
           (root / "zelda-keys" / "prod.keys").chmod(0o600)
