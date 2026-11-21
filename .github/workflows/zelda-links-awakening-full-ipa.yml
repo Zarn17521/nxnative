@@ -41,7 +41,9 @@ jobs:
           command -v xcodegen || brew install xcodegen
           brew list zstd >/dev/null 2>&1 || brew install zstd
           brew list glslang >/dev/null 2>&1 || brew install glslang
-          python3 -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic gdown
+          python3 -m venv "$RUNNER_TEMP/zelda-venv"
+          "$RUNNER_TEMP/zelda-venv/bin/python" -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic gdown
+          echo "$RUNNER_TEMP/zelda-venv/bin" >> "$GITHUB_PATH"
 
       - name: Download owned NSPs and keys
         shell: bash
