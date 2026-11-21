@@ -17,6 +17,7 @@ jobs:
       BASE_URL: ${{ secrets.BOTW_BASE_URL }}
       UPDATE_URL: ${{ secrets.BOTW_UPDATE_URL }}
       KEYS_URL: ${{ secrets.BOTW_KEYS_URL }}
+      GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
     steps:
       - name: Checkout original No-BC fork
         uses: actions/checkout@v4
@@ -30,6 +31,7 @@ jobs:
           test -n "$BASE_URL" || { echo "::error::Missing BOTW_BASE_URL"; exit 1; }
           test -n "$UPDATE_URL" || { echo "::error::Missing BOTW_UPDATE_URL"; exit 1; }
           test -n "$KEYS_URL" || { echo "::error::Missing BOTW_KEYS_URL"; exit 1; }
+          test -n "$GDRIVE_SERVICE_ACCOUNT_JSON" || { echo "::error::Missing GDRIVE_SERVICE_ACCOUNT_JSON"; exit 1; }
           test -f "dm/games/$GAME/game.tsv"
           grep -q $'package\tv1114112' "dm/games/$GAME/game.tsv"
 
@@ -42,7 +44,7 @@ jobs:
           brew list zstd >/dev/null 2>&1 || brew install zstd
           brew list glslang >/dev/null 2>&1 || brew install glslang
           python3 -m venv "$RUNNER_TEMP/botw-venv"
-          "$RUNNER_TEMP/botw-venv/bin/python" -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic gdown
+          "$RUNNER_TEMP/botw-venv/bin/python" -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic gdown google-auth requests
           echo "$RUNNER_TEMP/botw-venv/bin" >> "$GITHUB_PATH"
 
       - name: Download owned NSPs and keys
@@ -52,18 +54,54 @@ jobs:
           mkdir -p "$RUNNER_TEMP/botw-input" "$RUNNER_TEMP/botw-keys"
           chmod 700 "$RUNNER_TEMP/botw-keys"
           python3 - <<'PY'
-          import os, subprocess
+          import os, re, subprocess, json, time
           from pathlib import Path
+          import requests
+          from google.oauth2 import service_account
+          from google.auth.transport.requests import Request
+
           root = Path(os.environ["RUNNER_TEMP"])
-          for env, dest in [
-              ("BASE_URL", root / "botw-input" / "BOTW [01007EF00011E000][v0].nsp"),
-              ("UPDATE_URL", root / "botw-input" / "BOTW [01007EF00011E800][v1114112].nsp"),
-              ("KEYS_URL", root / "botw-keys" / "prod.keys"),
-          ]:
-              subprocess.run(["gdown", "--output", str(dest), os.environ[env]], check=True)
-              if not dest.is_file() or dest.stat().st_size == 0:
-                  raise RuntimeError(f"Download failed: {env}")
-          (root / "botw-keys" / "prod.keys").chmod(0o600)
+          credentials_info = json.loads(os.environ["GDRIVE_SERVICE_ACCOUNT_JSON"])
+          credentials = service_account.Credentials.from_service_account_info(
+              credentials_info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
+          )
+          def file_id(url):
+              match = re.search(r"/file/d/([A-Za-z0-9_-]+)", url)
+              if not match:
+                  match = re.search(r"[?&]id=([A-Za-z0-9_-]+)", url)
+              if not match and re.fullmatch(r"[A-Za-z0-9_-]{20,}", url):
+                  return url
+              if not match:
+                  raise RuntimeError("Expected Google Drive file URL or file ID")
+              return match.group(1)
+
+          def download_drive(env, destination):
+              fid = file_id(os.environ[env])
+              credentials.refresh(Request())
+              endpoint = f"https://www.googleapis.com/drive/v3/files/{fid}"
+              with requests.get(
+                  endpoint,
+                  params={"alt": "media", "supportsAllDrives": "true"},
+                  headers={"Authorization": f"Bearer {credentials.token}"},
+                  stream=True, timeout=(30, 180),
+              ) as response:
+                  if response.status_code != 200:
+                      raise RuntimeError(f"{env}: Google Drive API HTTP {response.status_code}: {response.text[:500]}")
+                  with destination.open("wb") as output:
+                      for chunk in response.iter_content(chunk_size=8 * 1024 * 1024):
+                          if chunk:
+                              output.write(chunk)
+              if not destination.is_file() or destination.stat().st_size == 0:
+                  raise RuntimeError(f"{env}: empty download")
+              print(f"{env}: downloaded {destination.stat().st_size:,} bytes")
+
+          download_drive("BASE_URL", root / "botw-input" / "BOTW [01007EF00011E000][v0].nsp")
+          download_drive("UPDATE_URL", root / "botw-input" / "BOTW [01007EF00011E800][v1114112].nsp")
+          key_file = root / "botw-keys" / "prod.keys"
+          subprocess.run(["gdown", "--output", str(key_file), os.environ["KEYS_URL"]], check=True)
+          if not key_file.is_file() or key_file.stat().st_size == 0:
+              raise RuntimeError("KEYS_URL: empty download")
+          key_file.chmod(0o600)
           PY
 
       - name: Build with unmodified fork defaults (include RomFS)
