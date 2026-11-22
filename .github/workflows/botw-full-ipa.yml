@@ -24,6 +24,22 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Reclaim unused macOS simulator storage
+        shell: bash
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          echo "Available disk space before cleanup:"
+          df -h "$RUNNER_TEMP"
+          # This workflow builds an iPhoneOS IPA, never starts an iOS simulator.
+          # Remove simulator runtimes from this disposable GitHub runner only.
+          xcrun simctl runtime list -v || true
+          xcrun simctl runtime delete all || echo "Simulator runtime removal not available"
+          xcrun simctl delete unavailable || true
+          rm -rf "$HOME/Library/Developer/Xcode/DerivedData" "$HOME/Library/Developer/CoreSimulator/Caches" || true
+          echo "Available disk space after cleanup:"
+          df -h "$RUNNER_TEMP"
+
       - name: Validate inputs
         shell: bash
         run: |
@@ -104,12 +120,41 @@ jobs:
           key_file.chmod(0o600)
           PY
 
-      - name: Build with unmodified fork defaults (include RomFS)
+      - name: Build with original No-BC defaults and CI-only disk reclaim
         id: build
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/botw-input" \
+          # The original developer script and game profile remain untouched in git.
+          # A throwaway copy only removes downloaded NSPs after successful extraction
+          # and DLC processing, when the build proceeds from the extracted RomFS.
+          python3 - <<'PY'
+          from pathlib import Path
+          original = Path("scripts/build_ipa_from_nsp.py")
+          ci_script = Path("scripts/_botw_ci_build_ipa_from_nsp.py")
+          script = original.read_text()
+          anchor = "    aoc = stage_external_dlc(work, aoc_dir) if aoc_dir is not None else extract_aoc(nx, keys, repo, work, app, fam, logs)\n"
+          assert script.count(anchor) == 1, "Build script changed: cannot safely insert disk cleanup"
+          extra = """
+              if os.environ.get('BOTW_CI_DROP_NSPS') == '1':
+                  reclaimed = 0
+                  for p in sorted(nsp_dir.glob('BOTW *.nsp')):
+                      if p.is_file():
+                          reclaimed += p.stat().st_size
+                          p.unlink()
+                  say(f'CI-only cleanup after successful NSP extraction: freed {reclaimed / 2**30:.1f} GiB')
+                  remaining = free_gb(work)
+                  say(f'CI disk available before shader compilation: {remaining:.1f} GiB')
+                  if remaining < 24:
+                      raise BuildError(f'not enough space for shaders and full IPA: {remaining:.1f} GiB available after cleanup (need 24 GiB)')
+          """
+          import textwrap
+          # The insertion is at function indentation level (four spaces).
+          extra = textwrap.dedent(extra).strip("\n")
+          extra = textwrap.indent(extra, "    ") + "\n"
+          ci_script.write_text(script.replace(anchor, anchor + extra))
+          PY
+          BOTW_CI_DROP_NSPS=1 python3 scripts/_botw_ci_build_ipa_from_nsp.py "$RUNNER_TEMP/botw-input" \
             -k "$RUNNER_TEMP/botw-keys/prod.keys"
 
       - name: Upload full IPA (even if verification fails)
