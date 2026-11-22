@@ -165,6 +165,8 @@ jobs:
           path: ${{ runner.temp }}/botw-input/ZeldaBreathOfTheWild.ipa
           if-no-files-found: error
           retention-days: 3
+          # IPA is already a ZIP archive; do not waste runner time recompressing it.
+          compression-level: 0
 
       - name: Verify IPA and game data
         shell: bash
