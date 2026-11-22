@@ -85,6 +85,7 @@ static UILabel *front_ios_fps_label(void);
 @interface DmRootVC : UIViewController
 @property (nonatomic, strong) DmGameView *game;
 @property (nonatomic, strong) UIView *pad;
+@property (nonatomic, strong) CAGradientLayer *portraitTheme;
 @property (nonatomic, strong) UILabel *fps;
 @property (nonatomic) BOOL launched;
 @property (nonatomic, strong) id tv;   // the TV scene accessory's registration (iOS 27)
@@ -112,6 +113,26 @@ static void launcher_done(void) { [g_root startGame]; }
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.blackColor;
+
+    // Appearance only: a red/black backdrop BEHIND the guest picture and
+    // existing transparent touch-controller view in portrait orientation.
+    // Never draw over the picture or change input targets, game resolution,
+    // rendering scale, JIT, or memory management.
+    CAGradientLayer *theme = [CAGradientLayer layer];
+    theme.colors = @[
+        (__bridge id)UIColor.blackColor.CGColor,
+        (__bridge id)UIColor.blackColor.CGColor,
+        (__bridge id)[UIColor colorWithRed:0.22 green:0.00 blue:0.03 alpha:1.0].CGColor,
+        (__bridge id)[UIColor colorWithRed:0.58 green:0.025 blue:0.055 alpha:1.0].CGColor,
+        (__bridge id)[UIColor colorWithRed:0.12 green:0.00 blue:0.02 alpha:1.0].CGColor
+    ];
+    theme.locations = @[@0.0, @0.30, @0.52, @0.78, @1.0];
+    theme.startPoint = CGPointMake(0.5, 0.0);
+    theme.endPoint = CGPointMake(0.5, 1.0);
+    theme.hidden = YES;
+    theme.actions = @{@"bounds": NSNull.null, @"position": NSNull.null, @"hidden": NSNull.null};
+    [self.view.layer insertSublayer:theme atIndex:0];
+    self.portraitTheme = theme;
 #if __has_include(<UIKit/UIHingeInteraction.h>)
     if (@available(iOS 27.1, *)) {
         __weak DmRootVC *weakSelf = self;
@@ -186,7 +207,11 @@ static void launcher_done(void) { [g_root startGame]; }
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    CGRect b = self.view.bounds; if (!self.game) return;
+    CGRect b = self.view.bounds;
+    // Leave landscape fully black as before; no controller changes.
+    self.portraitTheme.frame = b;
+    self.portraitTheme.hidden = b.size.height <= b.size.width;
+    if (!self.game) return;
     CGRect division = CGRectNull;   // an iPhone Duo's fold, as UIKit reports it (iOS 27.1)
     NSMutableArray<NSString *> *regionLog = [NSMutableArray array];
 #if __has_include(<UIKit/UIHingeInteraction.h>)
