@@ -1,0 +1,40 @@
+name: Strata Skin Mapping Checks
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [no-bc]
+    paths:
+      - 'dm/ios/Sources/**'
+      - 'dm/ios/project.yml'
+      - 'dm/ios/tests/test_skin_mapping.py'
+      - 'dm/ios/tests/test_orientation_policy.py'
+      - '.github/workflows/strata-skin-check.yml'
+  pull_request:
+    paths:
+      - 'dm/ios/Sources/**'
+      - 'dm/ios/project.yml'
+      - 'dm/ios/tests/test_skin_mapping.py'
+      - 'dm/ios/tests/test_orientation_policy.py'
+      - '.github/workflows/strata-skin-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Geometry and orientation regression
+        run: |
+          python3 -m unittest discover -s dm/ios/tests -p test_skin_mapping.py -v
+          python3 -m unittest discover -s dm/ios/tests -p test_orientation_policy.py -v
+      - name: Parse GameMenu Swift
+        run: xcrun swiftc -frontend -parse dm/ios/Sources/GameMenu.swift
+      - name: Compile standalone skin geometry header against iOS SDK
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          printf '#import "DmSkin.h"\nvoid test(void) { CGRect r = dm_skin_game_rect(CGRectMake(0,0,852,393), NO, 16.0/9.0); (void)r; }\n' > "$RUNNER_TEMP/skin-check.m"
+          xcrun --sdk iphoneos clang -target arm64-apple-ios26.0 -x objective-c -fsyntax-only -isysroot "$SDK" -I dm/ios/Sources "$RUNNER_TEMP/skin-check.m"
