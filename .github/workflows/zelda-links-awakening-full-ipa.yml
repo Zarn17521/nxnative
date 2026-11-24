@@ -21,6 +21,9 @@ jobs:
       - name: Checkout original No-BC fork
         uses: actions/checkout@v4
         with:
+          repository: mianmuhammadse/nxnative
+          ref: no-bc
+          submodules: recursive
           persist-credentials: false
 
       - name: Validate inputs
@@ -42,7 +45,7 @@ jobs:
           brew list zstd >/dev/null 2>&1 || brew install zstd
           brew list glslang >/dev/null 2>&1 || brew install glslang
           python3 -m venv "$RUNNER_TEMP/zelda-venv"
-          "$RUNNER_TEMP/zelda-venv/bin/python" -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic gdown
+          "$RUNNER_TEMP/zelda-venv/bin/python" -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic backports.zstd gdown
           echo "$RUNNER_TEMP/zelda-venv/bin" >> "$GITHUB_PATH"
 
       - name: Download owned NSPs and keys
@@ -66,20 +69,22 @@ jobs:
           (root / "zelda-keys" / "prod.keys").chmod(0o600)
           PY
 
-      - name: Build with unmodified fork defaults (include RomFS)
+      - name: Build with untouched upstream No-BC defaults
         id: build
         shell: bash
         run: |
           set -euo pipefail
+          git rev-parse HEAD
           python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/zelda-input" \
             -k "$RUNNER_TEMP/zelda-keys/prod.keys"
+          git diff --exit-code
 
       - name: Upload full IPA (even if verification fails)
         if: ${{ always() && steps.build.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: ZeldaLinksAwakening-NoBC-FullIPA
-          path: ${{ runner.temp }}/zelda-input/ZeldaLinksAwakening.ipa
+          path: ${{ runner.temp }}/zelda-input/*.ipa
           if-no-files-found: error
           retention-days: 3
 
@@ -87,7 +92,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          IPA="$RUNNER_TEMP/zelda-input/ZeldaLinksAwakening.ipa"
+          shopt -s nullglob
+          ipas=("$RUNNER_TEMP/zelda-input/"*.ipa)
+          test "${#ipas[@]}" -eq 1
+          IPA="${ipas[0]}"
           test -s "$IPA"
           python3 - "$IPA" <<'PY'
           import sys, zipfile
