@@ -37,6 +37,7 @@ scripts/pack_nup.py	*:*	NUP packing: games built from NUP containers
 scripts/bench.py	-	the benchmark
 scripts/push_romfs.sh	*:*	RomFS transfer: every game's iOS build
 scripts/regress.py	-	the regression harness
+scripts/bug_report.py	-	the bug report collector (reads logs and stamps, runs no game)
 scripts/cheat_anchor.py	-	cheat files carried between builds offline: no game runs it
 scripts/prepare_mod.py	-	offline mod exefs rewriter: no game runs it
 dm/tools/usage.py	-	the usage manifests
@@ -79,6 +80,7 @@ dm/gfx/tools/dmsh_build.py:ps_libraries	shader:readable_tile	readable tiles (cut
 dm/gfx/tools/dmsh_build.py:vs_pad	shader:vs_pad	padded vertex outputs
 dm/gfx/tools/dmsh_reflect.py:drv_reads|unfillable|DRV_FILL	shader:driver_read_*	driver constant segments
 dm/gfx/tools/dmsh_build.py:spv_single_lane|SG_	shader:simd	subgroup operations
+dm/gfx/tools/dmsh_metalwa.py	shader:simd	Metal GPU compiler workarounds (KK3 ballots, KK9 loop breaks)
 dm/gfx/tools/dmsh_build.py:vertex_ab	shader:stage:vs	VertexA / VertexB programs
 dm/gfx/tools/dmsh_reflect.py:reflect|decode_	shader:stage:*	the reflection every shader's bindings come from
 dm/gfx/tools/dmsh_build.py	shader:stage:*	the shader build: every NVN game

@@ -94,8 +94,9 @@ typedef struct {
     unsigned ue_malloc_slot;   // the slot of its name getter, which names the slot layout
     struct { char name[32]; uint64_t off; } ue_cvar[8];   // Unreal console variables found by their registered names (patch_nso.py, ue_cvar.py; UE_CVAR:<name>): each one's TAutoConsoleVariable
     int n_ue_cvar;
-    uint64_t fps_target_ptr;   // a target frame rate the game steps by, an int32 at [main + fps_target_ptr] + fps_target_field (patch_nso.py, fps_target.py; hle_fpslock.c); 0 = none
+    uint64_t fps_target_ptr;   // target rate at [main + fps_target_ptr] + fps_target_field (fps_target.py); 0 = none
     uint32_t fps_target_field;
+    int fps_target_f32;       // RE Engine MaxFps is float; earlier fixups name an int32 frame rate
     uint64_t monolith_interval; // Monolith's native frame interval, an int32 at main + this (monolith_fps.py); 0 = not found
     struct { uint64_t off; uint8_t len, orig[16], cut[16]; } alias_cut[32];   // iOS-only alias cuts (patch_nso.py ALIAS_CUT rows), undone at load on Mac when alias >= DM_SWITCH_ALIAS
     int n_alias_cut;
@@ -187,7 +188,7 @@ void dm_movie_active(int active);   // iOS movie decoder recovery waits for acti
 void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (0 tick hold, 1 background, 2 system keyboard, 3 NVN prepare, 4 NVN archive init); see hle_os.c
 void guest_clock_read_wait(void);     // A guest read of the system counter: counts it in dm_clock_reads and waits while backgrounded or preparing (hle_os.c)
 extern __thread uint64_t dm_clock_reads;   // the calling thread's guest reads of the system counter (hle_os.c; thr_yield tells clock waits by them)
-void dm_guest_frame_tick(void);        // Called on every present (hle_nvn.c): when DM_DETCLOCK is on, advances the guest clock by one fixed step
+void dm_guest_frame_tick(void);        // Called on every present (NVN, Vulkan, OpenGL): runs dm_cheats_present and, when DM_DETCLOCK is on, advances the guest clock
 uint64_t dm_nvn_frame_count(void);
 uint64_t dm_nvn_sub_cpu_ns(void);     // Cumulative CPU nanoseconds of submit (excluding present)
 void dm_backtrace(uint64_t fp);
@@ -250,7 +251,7 @@ int dm_guest_heap_read(uint64_t addr, void *out, size_t len);    // hle_svc.c: h
 int dm_guest_heap_write(uint64_t addr, const void *src, size_t len);   // hle_svc.c: hole-free guest heap write (the dirty tracking sees it first)
 // Cheats (hle_cheats.c): Atmosphère-format cheat code files applied to the running game (docs/development.md "Cheats")
 void dm_cheats_init(void);            // Called once in host_preload after loading the modules (main.c): reads DM_CHEATS and friends, loads the build's file
-void dm_cheats_present(void);         // Per presented frame (hle_nvn.c presents): applies the enabled cheats once
+void dm_cheats_present(void);         // Per presented frame (called from hle_os.c dm_guest_frame_tick): applies the enabled cheats once
 // The Cheats submenu's rows (front_mac.m, Mac window only). Readers of the list of cheats; the front end copies the strings out immediately
 int dm_cheats_found(void);            // A cheat file is loaded (this build's, or another build's on DM_CHEATS_ANY_BUILD)
 int dm_cheats_ncheats(void);          // The loaded file's cheats, in file order

@@ -27,7 +27,7 @@
 #   --lock FILE (DM_MEASURE_LOCK): the measuring lock bench.py --lock shares, held only while a game runs.
 #
 # What it checks, per game:
-# 1. Chain (static): the game's shaders translated by each revision's chain (dmsh_build.py through own_compilers.py; Vulkan: vk_shaders.py; OpenGL: gl_shaders.py), compared shader by shader: built or failed
+# 1. Chain (static): the game's shaders translated by each revision's chain (dmsh_build.py through own_compilers.py; Vulkan: vk_shaders.py; OpenGL: gl_shaders.py; NVN with gl_capture.tsv: both), compared shader by shader: built or failed
 #    (newly failing by the rule of dm/gfx/tools/shader_regressions.py, which the NSP script applies to one game's previous build; a new shader that fails is listed apart),
 #    the SHA-256 of the MSL (<key>_b.metal), of the reflection (<key>_b.json without its chain fields) and of the variant libraries (_bf, _bv, _bp, _bg*). A build is kept per chain version,
 #    shader package, profile inputs and compilers (<NSP folder>/<id>-work/regress/chain/<key>/; only the few used last stay, prune_chains), so a revision whose chain did not change costs nothing, and dmsh_build.py uses a bounded per-game regression cache with read-only reuse of the player's cache (DMSH_CAS), so MSL
@@ -71,7 +71,7 @@
 #   baseline (a deleted bindless access, extra entry points: shader_regressions.losses), the interface check, a crash, a hang, the frame not reached), REGRESSION (new [RED] lines, a screenshot beyond the tolerance, frame time, memory or prepare time worse beyond it), CHANGED (MSL or numbers differ, nothing worse),
 #   PASS. "known" lists failures the baseline has too (they do not fail the check).
 # Exit status: 0 = no regression, 1 = a regression (NEW-FAIL or REGRESSION) in some game, 2 = a harness error (and no regression found).
-import argparse, collections, concurrent.futures as cf, contextlib, ctypes, datetime, fcntl, hashlib, importlib.util, json, math, os, re, shutil, signal, struct, subprocess, sys, time, traceback
+import argparse, collections, concurrent.futures as cf, contextlib, ctypes, datetime, fcntl, hashlib, importlib.util, json, math, os, re, shutil, signal, struct, subprocess, sys, threading, time, traceback
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -88,7 +88,7 @@ bench = load_module('bench', REPO / 'scripts/bench.py')
 shader_regressions = load_module('shader_regressions', REPO / 'dm/gfx/tools/shader_regressions.py')
 usage = load_module('usage', REPO / 'dm/tools/usage.py')   # usage manifests and change impact (regress.py usage / impact)
 run_saves = load_module('run_saves', REPO / 'dm/tools/run_saves.py')   # cloud saves off in every run (run_env)
-proc_group = load_module('proc_group', REPO / 'dm/tools/proc_group.py')   # a heavy job in a process group of its own, stopped whole (run_heavy)
+proc_group = load_module('proc_group', REPO / 'dm/tools/proc_group.py')   # a job in a process group of its own, stopped whole (run_heavy, modules_for)
 tree_tar = load_module('tree_tar', REPO / 'dm/tools/tree_tar.py')   # a work folder's quiet folders as one file each, and an old revision's compile cache
 shader_cache = load_module('shader_cache', REPO / 'dm/tools/shader_cache.py')   # the per-game regression compile cache, with read-only reuse of the player's
 shader_lib = load_module('shader_lib', REPO / 'dm/tools/shader_lib.py')   # a chain build's libraries as one file, read in place
@@ -96,8 +96,7 @@ rfs = shader_lib.romfs
 # Where they are depends on the machine (a drive with room for the trees and the games' NSP folders): set with --root / --games-dir or REGRESS_ROOT / REGRESS_GAMES, checked in main
 ROOT = Path(os.environ.get('REGRESS_ROOT', ''))
 GAMES = Path(os.environ.get('REGRESS_GAMES', ''))
-HOST_DIRS = ('dm/host', 'dm/gfx', 'dm/gfx/nvn', 'dm/gfx/nvn/include', 'dm/gfx/tex', 'dm/gfx/vk', 'dm/gfx/gl')   # as build_ipa_from_nsp.py: the host's sources and headers
-REWRITER = ('dm/tools/patch_nso.py', 'dm/tools/jump_solver.py', 'dm/tools/nso.py', 'dm/tools/mod_layout.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/tools/engine_patches.py', 'dm/tools/ue_cvar.py', 'dm/tools/ue_malloc.py', 'dm/tools/ue_region.py', 'dm/tools/ue_ring.py', 'dm/tools/fps_target.py', 'dm/tools/monolith_fps.py', 'dm/tools/loader_census.py', 'dm/tools/ue_fixed_rate.py', 'dm/tools/unity_fps.py', 'dm/tools/unity_bucket.py', 'dm/tools/snowdrop_pools.py')
+REWRITER = ('dm/tools/patch_nso.py', 'dm/tools/jump_solver.py', 'dm/tools/nso.py', 'dm/tools/mod_layout.py', 'dm/tools/nso_code.py', 'dm/tools/nso_asm.py', 'dm/tools/nso_syms.py', 'dm/tools/nso_match.py', 'dm/tools/sdk_patches.py', 'dm/tools/engine_patches.py', 'dm/tools/ue_cvar.py', 'dm/tools/ue_malloc.py', 'dm/tools/ue_region.py', 'dm/tools/ue_ring.py', 'dm/tools/fps_target.py', 'dm/tools/monolith_fps.py', 'dm/tools/loader_census.py', 'dm/tools/ue_fixed_rate.py', 'dm/tools/unity_fps.py', 'dm/tools/unity_bucket.py', 'dm/tools/snowdrop_pools.py')
 HEAVY_EXE = {'clang', 'make', 'xcodebuild', 'ld', 'ld64', 'swift-frontend', 'dotnet', 'metal', 'metal-tt', 'air-tt', 'applegpu-nt', 'dmsh_xlate', 'spirv-cross'}   # jobs that skew a measurement
 HEAVY_PY = r'(dmsh_build|shader_split|own_compilers|patch_nso|vk_shaders)\.py'   # (the shared measuring rule)
 # Tolerances, from runs of one revision against itself (docs/development.md, The regression harness)
@@ -350,6 +349,50 @@ def toolchain_fp():
     return hashlib.sha256('\0'.join(re.sub(r'(?m)^InstalledDir:.*\n?', '', o) for o in out).encode()).hexdigest()
 
 
+def gl_fixed_mode(g):
+    """Whether a GL game uses the host's fixed-function pipeline (profile_guess.build_sources, matching build_ipa_from_nsp.py)."""
+    if getattr(g, 'kind', None) != 'gl': return False
+    if callable(getattr(g, 'gl_fixed', None)): return bool(g.gl_fixed())
+    build, ver = getattr(g, 'build', None), getattr(g, 'ver', None)
+    if not build or not ver: return False
+    exefs = Path(build) / 'extract' / ver / 'ExeFS'
+    if not (exefs / 'main').is_file(): return False
+    pg = load_module('regress_profile_guess', REPO / 'dm/games/profile_guess.py')
+    return bool(pg.build_sources(exefs, g.romfs(), ())['gl_fixed'][0])
+
+
+def gl_capture_wanted(g, tree):
+    """Whether an NVN game's profile lists captured GLSL stages (gl_capture.tsv), matching build_ipa_from_nsp.py's nvn_gl."""
+    if getattr(g, 'kind', None) != 'nvn' or not callable(getattr(g, 'profile_dir', None)): return False
+    try: lines = (g.profile_dir(tree) / 'gl_capture.tsv').read_text().splitlines()
+    except OSError: return False
+    return any(l.strip() and not l.startswith('#') for l in lines)
+
+
+def supplemental_gl_root(g, tree):
+    """The captured GLSL folder of a mixed NVN+GL build (extract/<ver>/gl_capture), or None for a pure NVN game."""
+    if not gl_capture_wanted(g, tree): return None
+    build, ver = getattr(g, 'build', None), getattr(g, 'ver', None)
+    cap = Path(build) / 'extract' / ver / 'gl_capture' if build and ver else None
+    if not cap or not cap.is_dir():
+        raise HarnessError(f'{g.id}: profile lists GL capture shaders (gl_capture.tsv), but {cap or "extract/<ver>/gl_capture"} is missing')
+    return cap
+
+
+def gl_chain_parts(tree, roots, fixed=False):
+    """(translator digest, side digest, sources digest) of a GL shader build on roots."""
+    v = digest([tree.path / 'dm/gfx/tools/gl_shaders.py'])[:12]
+    side = digest([tree.path / p for p in ('dm/gfx/tools/mvgl.py', 'dm/gfx/tools/dmsh_chain.py', 'dm/ios/tools/ios_metal.py')])
+    if fixed:
+        side += ':fixed-function'
+    else:
+        compiler = shutil.which('glslangValidator')
+        side += ':shader:' + (digest([Path(compiler)]) if compiler else 'glslangValidator missing')
+    gl = load_module('regress_gl_sources', REPO / 'dm/gfx/tools/gl_shaders.py')
+    sources = hashlib.sha256(repr(sorted({(hashlib.sha256(s).hexdigest(), st or '') for s, st, _ in gl.sources(roots)})).encode()).hexdigest()
+    return v, side, sources
+
+
 def chain_key(tree, g, tools):
     if g.kind == 'nvn':
         v, inp = json.loads(tree.py("import sys, json; sys.path.insert(0, 'dm/gfx/tools'); import dmsh_chain as c; g = c.load_game(); print(json.dumps([c.version(), c.inputs(g)]))", g.env(tree)))
@@ -361,18 +404,18 @@ def chain_key(tree, g, tools):
         geo = g.profile_dir(tree) / 'geo_pairs.tsv'   # the vertex / geometry pairs that get mesh libraries (dmsh_chain.mesh_pairs), the split's copy for a profile without one
         if not geo.is_file(): geo = g.build / 'shader/geo_pairs.tsv'
         side += digest([pairs] + ([geo] if geo.is_file() else []))
+        if gl_cap := supplemental_gl_root(g, tree):
+            gv, gside, gsources = gl_chain_parts(tree, [gl_cap])
+            side += ':gl:' + gv + ':' + gside
+            sources += ':gl:' + gsources
     elif g.kind == 'vk':
         v, inp = digest([tree.path / 'dm/gfx/tools/vk_shaders.py'])[:12], g.ver
         side = ''
         vk = load_module('regress_vk_sources', REPO / 'dm/gfx/tools/vk_shaders.py')
         sources = digest(sorted(Path(p) for root in g.shader_roots() for p in vk.spirv_files(root)), root=g.build)
     elif g.kind == 'gl':
-        v, inp = digest([tree.path / 'dm/gfx/tools/gl_shaders.py'])[:12], g.ver
-        side = digest([tree.path / p for p in ('dm/gfx/tools/mvgl.py', 'dm/gfx/tools/dmsh_chain.py', 'dm/ios/tools/ios_metal.py')])
-        compiler = shutil.which('glslangValidator')
-        side += digest([Path(compiler)]) if compiler else 'glslangValidator missing'
-        gl = load_module('regress_gl_sources', REPO / 'dm/gfx/tools/gl_shaders.py')
-        sources = hashlib.sha256(repr(sorted({(hashlib.sha256(s).hexdigest(), st or '') for s, st, _ in gl.sources(g.shader_roots())})).encode()).hexdigest()
+        v, side, sources = gl_chain_parts(tree, g.shader_roots(), fixed=gl_fixed_mode(g))
+        inp = g.ver
     else: raise HarnessError(f'{g.id}: the chain check does not cover {g.kind} games yet')
     sc = tree.path / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'
     if sc.is_file() or os.environ.get('SPIRV_CROSS'):   # earlier revisions use PATH, already covered by tools; pinned revisions also honor SPIRV_CROSS
@@ -486,6 +529,34 @@ def pack_chain(tree, lib):
     if (tree.path / 'dm/tools/shader_lib.py').is_file(): shader_lib.pack(lib, say)
 
 
+def build_gl_chain(tree, g, a, roots, out, env, log, *, fixed=False, msl_name='msl', trans_name='translations.json'):
+    """Run tree's gl_shaders.py on roots into out/gl/ → (shaders, ok, paused)."""
+    msl = out / msl_name; shutil.rmtree(msl, ignore_errors=True); msl.mkdir()
+    trans = out / trans_name; trans.unlink(missing_ok=True)
+    shutil.rmtree(out / 'gl', ignore_errors=True)
+    argv = [str(tree.path / 'dm/gfx/tools/gl_shaders.py'), *map(str, roots), str(out)] + (['--fixed-function'] if fixed else [])
+    # Record the translator's actual outcomes, including rejected sources; failed stage guesses of a source that translated successfully are not failures.
+    wrap = ('import sys, json, hashlib, contextlib, tempfile\n'
+            f'sys.path.insert(0, {str(tree.path / "dm/gfx/tools")!r})\nimport gl_shaders as gl\n'
+            f'@contextlib.contextmanager\ndef keep(*a, **k): yield {str(msl)!r}\n'
+            'tempfile.TemporaryDirectory = keep\noriginal = gl.one\nresults = {}\n'
+            'def one(item, tmp):\n'
+            '    rows = original(item, tmp)\n'
+            '    for key, stage, fields, path, where in rows:\n'
+            '        entry = {"st": "ok" if stage else "translation failed"}\n'
+            '        if stage:\n'
+            '            entry["msl"] = hashlib.sha256(open(path, "rb").read()).hexdigest()[:16]\n'
+            '            entry["refl"] = hashlib.sha256(" ".join(fields).encode()).hexdigest()[:16]\n'
+            '        else: entry["err"] = " / ".join(fields)[:400]\n'
+            '        results[key + "_" + (stage or item[1] or "unknown")] = entry\n'
+            '    return rows\n'
+            f'gl.one = one\nsys.argv = {argv!r}\n'
+            f'try: gl.main()\nfinally: open({str(trans)!r}, "w").write(json.dumps(results))\n')
+    rc, paused = run_heavy([sys.executable, '-c', wrap], log, tree.path, env, a, f'{g.id} shader build')
+    ok = rc == 0 and (out / 'gl/gl_shaders.metallib').is_file() and (out / 'gl/gl_shaders.tsv').is_file()
+    return gl_manifest(trans, ok, log, fixed=fixed), ok, paused
+
+
 def chain_build_locked(tree, g, a, v, inp, key, out):
     jobs = a.jobs
     mf = out / 'manifest.json'
@@ -494,7 +565,8 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
         lib = shader_lib.view(out / f'b-{v}')
         if g.kind == 'nvn' and m.get('hashes') != NVN_HASHES and (lib / '_b_build.json').is_file():   # made by an older nvn_manifest: its hashes would not compare with this one's
             say(f'  {g.id}: hashing the outputs of chain {v} again (manifest hashes {m.get("hashes", 1)} → {NVN_HASHES})')
-            m['shaders'] = nvn_manifest(lib, jobs); m['hashes'] = NVN_HASHES
+            gl_entries = {k: x for k, x in m.get('shaders', {}).items() if k.startswith('gl:')}
+            m['shaders'] = nvn_manifest(lib, jobs) | gl_entries; m['hashes'] = NVN_HASHES
             mf.write_text(json.dumps({k: x for k, x in m.items() if k != 'secs'}, indent=0))
         # The archive planner and depth mode can change without changing the translation chain.
         if g.kind == 'nvn': m['interface'] = interface_check(tree, g, out); pack_chain(tree, out / f'b-{v}')
@@ -503,7 +575,9 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
     env = dotnet_env(g.env(tree)); env.update(WORK=str(tmp), TMPDIR=str(tmp) + '/', J=str(jobs))
     t0 = time.time(); log = out / 'build.log'
     done = (out / 'built.ok').is_file()   # a build whose outputs are complete (a run stopped while hashing, or a build made by hand); its manifest is made again
+    gl_ok = None
     if g.kind == 'nvn':
+        gl_cap = supplemental_gl_root(g, tree)
         tools_dir = tree.path / 'dm/gfx/tools'
         cas = chain_cache(tree, g)
         env.update(XLATE=str(tools_dir / 'dmsh_xlate_bin/dmsh_xlate'), DMSH_CAS=str(cas))
@@ -527,6 +601,11 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
             if cas.suffix != '.db': tree_tar.pack(cas, say)
         say(f'  {g.id}: hashing the outputs of chain {v}')
         shaders = nvn_manifest(shader_lib.view(lib), jobs)
+        if gl_cap:
+            say(f'  {g.id}: gl_shaders.py (supplemental) of {tree.id} → {out}')
+            gl_shaders, gl_ok, paused = build_gl_chain(tree, g, a, [gl_cap], out, env, out / 'gl_build.log', msl_name='gl_msl', trans_name='gl_translations.json')
+            t0 += paused
+            shaders.update({f'gl:{k}': x for k, x in gl_shaders.items()})
     elif g.kind == 'vk':
         say(f'  {g.id}: vk_shaders.py {v} of {tree.id} → {out}')
         msl = out / 'msl'; shutil.rmtree(msl, ignore_errors=True); msl.mkdir()
@@ -540,30 +619,13 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
         shaders = vk_manifest(msl, out / 'vk/vk_shaders.tsv', rc == 0, log)
     else:
         say(f'  {g.id}: gl_shaders.py {v} of {tree.id} → {out}')
-        msl = out / 'msl'; shutil.rmtree(msl, ignore_errors=True); msl.mkdir()
-        # Record the translator's actual outcomes, including rejected sources; failed stage guesses of a source that translated successfully are not failures.
-        wrap = ('import sys, json, hashlib, contextlib, tempfile\n'
-                f'sys.path.insert(0, {str(tree.path / "dm/gfx/tools")!r})\nimport gl_shaders as gl\n'
-                f'@contextlib.contextmanager\ndef keep(*a, **k): yield {str(msl)!r}\n'
-                'tempfile.TemporaryDirectory = keep\noriginal = gl.one\nresults = {}\n'
-                'def one(item, tmp):\n'
-                '    rows = original(item, tmp)\n'
-                '    for key, stage, fields, path, where in rows:\n'
-                '        entry = {"st": "ok" if stage else "translation failed"}\n'
-                '        if stage:\n'
-                '            entry["msl"] = hashlib.sha256(open(path, "rb").read()).hexdigest()[:16]\n'
-                '            entry["refl"] = hashlib.sha256(" ".join(fields).encode()).hexdigest()[:16]\n'
-                '        else: entry["err"] = " / ".join(fields)[:400]\n'
-                '        results[key + "_" + (stage or item[1] or "unknown")] = entry\n'
-                '    return rows\n'
-                f'gl.one = one\nsys.argv = {[str(tree.path / "dm/gfx/tools/gl_shaders.py"), *map(str, g.shader_roots()), str(out)]!r}\n'
-                f'try: gl.main()\nfinally: open({str(out / "translations.json")!r}, "w").write(json.dumps(results))\n')
-        rc, paused = run_heavy([sys.executable, '-c', wrap], log, tree.path, env, a, f'{g.id} shader build'); t0 += paused
-        shaders = gl_manifest(out / 'translations.json', rc == 0 and (out / 'gl/gl_shaders.metallib').is_file(), log)
+        shaders, gl_ok, paused = build_gl_chain(tree, g, a, g.shader_roots(), out, env, log, fixed=gl_fixed_mode(g))
+        t0 += paused
     st = collections.Counter(s['st'] for s in shaders.values())
     m = {'key': key, 'kind': g.kind, 'chain': v, 'inputs': inp, 'tree': tree.id, 'game': g.id, 'total': len(shaders), 'ok': st['ok'], 'failed': len(shaders) - st['ok'],
          'failed_by_status': {k: n for k, n in st.items() if k != 'ok'}, 'build_secs': round(time.time() - t0, 1), 'shaders': shaders}
-    if g.kind in ('vk', 'gl'): m['build_failed'] = rc != 0
+    if g.kind == 'vk': m['build_failed'] = rc != 0
+    elif gl_ok is not None: m['build_failed'] = not gl_ok
     if g.kind == 'nvn': m['interface'] = interface_check(tree, g, out); m['hashes'] = NVN_HASHES
     mf.write_text(json.dumps(m, indent=0))
     if g.kind == 'nvn': pack_chain(tree, out / f'b-{v}')
@@ -631,10 +693,14 @@ def vk_manifest(msl, table, ok, log):
     return keys
 
 
-def gl_manifest(translations, ok, log):
+def gl_manifest(translations, ok, log, fixed=False):
     """The GL builder's per-source/stage outcomes, with a failed Metal library distinguished from a translation failure."""
     if not translations.is_file(): raise HarnessError(f'GL shader build produced no translation results (see {log})')
     entries = json.loads(translations.read_text())
+    if fixed:
+        if entries: raise HarnessError(f'fixed-function GL shader build translated unexpected sources (see {log})')
+        if not ok: raise HarnessError(f'fixed-function GL shader build failed (see {log})')
+        return {}
     if not entries: raise HarnessError(f'GL shader build found no sources (see {log})')
     if not ok:
         for e in entries.values():
@@ -679,7 +745,8 @@ def interface_check(tree, g, out):
     # Run pso_offline in the tree's own Python process so baseline and candidate never share sys.modules (dmsh_abi, dmsh_side, romfs, ...)
     todo = [tuple(pr) for pr in json.loads(tree.py(
         "import json, sys; sys.path.insert(0, 'dm/gfx/tools'); import pso_offline as po; "
-        "print(json.dumps(po.read_pairs(po.pair_text(json.load(sys.stdin)))))",
+        "paths = json.load(sys.stdin); "
+        "print(json.dumps(po.read_pairs_files(paths) if hasattr(po, 'read_pairs_files') else po.read_pairs(po.pair_text(paths))))",
         env, stdin=json.dumps([str(p) for p in pairs if p.is_file()])))]
     zero = depth_zero(g, tree)
     keys = {k for pr in todo for k in pr}
@@ -767,36 +834,54 @@ def build_summary(m):
 # ---------------------------------------------------------------- host and rewritten modules of a revision
 
 def host_for(tree, g, jobs):
-    srcs = [p for d in HOST_DIRS for p in sorted((tree.path / d).iterdir()) if p.is_file() and p.suffix in ('.c', '.m', '.h', '.S', '.inc')]
-    if (tree.path / 'dm/gfx/tools/host_msl.py').is_file():   # older baseline revisions compiled these sources at run time
-        r = sh(['make', '-s', f'GAME={g.id}', 'host_msl'], cwd=tree.path / 'dm/host', env=g.env(tree))
-        if r.returncode: raise HarnessError(f'{g.id}: host shader libraries of {tree.id} do not build:\n{r.stdout}{r.stderr}')
-        srcs.append(tree.path / 'dm/host/gen/msl-macosx/host_msl_gen.h')   # includes sources, compiler, SDK and deployment target, even on a cache hit
-    key = digest(srcs + [tree.path / 'dm/host/Makefile', g.profile_dir(tree) / 'game.tsv', tree.path / 'dm/games/game.py'], g.id.encode())[:16]
-    dst = game_root(g) / 'host' / key / 'dmhost'
-    if dst.is_file(): return dst, key, 0
     t0 = time.time(); env = g.env(tree); hd = tree.path / 'dm/host'
-    say(f'  {g.id}: building the host of {tree.id}')
+    per_title = f'gen/{g.id}/dmhost'
     log = game_root(g) / 'tmp' / f'host-{tree.id}-{g.id}.log'; log.parent.mkdir(parents=True, exist_ok=True)
-    with open(log, 'w') as f:
-        for target in (['gen/vpx/libvpx.a', f'-j{jobs}'], ['dmhost']):
-            r = subprocess.run(['make', f'GAME={g.id}', *target], cwd=hd, env=env, stdout=f, stderr=subprocess.STDOUT)
+    with open(hd / '.regress-host.lock', 'w') as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        use_per_title = sh(['make', '-n', '-s', f'GAME={g.id}', per_title], cwd=hd, env=env).returncode == 0
+        target = per_title if use_per_title else 'dmhost'
+        built = hd / target
+        before = (built.stat().st_mtime_ns, built.stat().st_size) if built.is_file() else None
+        say(f'  {g.id}: building the host of {tree.id}')
+        with open(log, 'w') as f:
+            r = subprocess.run(['make', f'GAME={g.id}', f'-j{jobs}', target], cwd=hd, env=env, stdout=f, stderr=subprocess.STDOUT)
             if r.returncode: raise HarnessError(f'{g.id}: the host of {tree.id} does not build (see {log})')
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if sh(['cp', '-c', hd / 'dmhost', dst]).returncode: shutil.copy2(hd / 'dmhost', dst)
-    return dst, key, round(time.time() - t0, 1)
+        if not built.is_file(): raise HarnessError(f'{g.id}: make did not produce {target} for {tree.id} (see {log})')
+        after = (built.stat().st_mtime_ns, built.stat().st_size)
+        key = sha256_file(built).hexdigest()[:16]
+        dst = game_root(g) / 'host' / key / 'dmhost'
+        reused_bin = dst.is_file()
+        if not reused_bin:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dst.with_name(f'dmhost.partial.{os.getpid()}.{threading.get_ident()}')
+            try:
+                if sh(['cp', '-c', built, tmp]).returncode: shutil.copy2(built, tmp)
+                os.replace(tmp, dst)
+            except BaseException:
+                tmp.unlink(missing_ok=True); raise
+    return dst, key, 0 if (reused_bin and before == after) else round(time.time() - t0, 1)
 
 
 def rewriter_key(tree):
     return digest([tree.path / f for f in REWRITER] + sorted((tree.path / 'dm/games').glob('*/patches.py')))[:16]
 
 
+def build_modules_key(patched):
+    p = Path(patched)
+    files = sorted(f for f in p.iterdir() if f.is_file()) if p.is_dir() else []
+    return 'build-' + digest(files, p.name.encode())[:16]
+
+
+def modules_complete(dst, names, has_nro):
+    if not (dst / '.done').is_file(): return False
+    if (dst / 'nro.tsv').is_file() != has_nro: return False
+    return all((dst / f'{m}.{ext}').is_file() for m in names for ext in ('patched.bin', 'fixups.tsv', 'gates.tsv'))
+
+
 def modules_for(tree, g, rewrite, jobs):
-    """The rewritten modules a run takes: the build's (rewrite False), or the tree's patch_nso.py on the build's extracted modules, cached by the rewriter's files"""
-    if not rewrite: return g.patched, 'build'
-    key = rewriter_key(tree)
-    dst = game_root(g) / 'patched' / key / g.patched.name
-    if (dst / '.done').is_file(): return dst, key
+    """The rewritten modules a run takes: the build's (rewrite False), or the tree's patch_nso.py on the build's extracted modules, cached by the rewriter and actual inputs"""
+    if not rewrite: return g.patched, build_modules_key(g.patched)
     mods = g.env(tree)
     if not g.derived:
         # Registered builds rewrite with this revision's original profile. The
@@ -805,48 +890,87 @@ def modules_for(tree, g, rewrite, jobs):
         mods.pop('DM_GAMES_DIR', None)
         mods.pop('DM_GAMES_FIRST', None)
     names = tree.py(f"import sys; sys.path.insert(0, 'dm/games'); import game; print(' '.join(game.load({g.id!r}).words('modules')))", mods).split()
-    src = {m: g.build / 'extract' / g.ver / 'ExeFS' / m for m in names if m == 'main' or (g.build / 'extract' / g.ver / 'ExeFS' / m).is_file()}   # a version may lack a module another has
+    exefs = g.build / 'extract' / g.ver / 'ExeFS'
+    src = {m: exefs / m for m in names if m == 'main' or (exefs / m).is_file()}   # a version may lack a module another has
     nro = g.build / f'nro_{g.ver}' / 'nro.tsv'
-    if nro.is_file():
+    has_nro = nro.is_file()
+    if has_nro:
         for ln in nro.read_text().splitlines():
             c = ln.split('\t')
-            if ln and not ln.startswith(('#', 'refused\t')): src[c[0]] = nro.parent / (c[0] + '.nro')
-    shutil.rmtree(dst, ignore_errors=True); dst.mkdir(parents=True)
-    if nro.is_file(): shutil.copyfile(nro, dst / 'nro.tsv')
+            if ln.strip() and not ln.startswith(('#', 'refused\t')): src[c[0]] = nro.parent / (c[0] + '.nro')
+    extra_patches = [p for d in mods.get('DM_GAMES_DIR', '').split(os.pathsep) if d for p in sorted(Path(d).glob('*/patches.py'))]
+    profile_name = Path(mods.get('DM_GAME') or '-').name
+    profile_tsvs = [tree.path / 'dm/games' / profile_name / 'game.tsv'] + [Path(d) / profile_name / 'game.tsv' for d in mods.get('DM_GAMES_DIR', '').split(os.pathsep) if d]
+    own = []
+    for tsv in profile_tsvs:
+        try: own.append([l for l in tsv.read_text(encoding='utf-8').splitlines() if l.startswith(('build\t', 'snowdrop_pools\t'))])
+        except OSError: own.append([])
+    try:
+        import capstone
+        cs_ver = capstone.__version__
+    except ImportError:
+        cs_ver = 'missing'
+    meta = json.dumps({'rev': rewriter_key(tree), 'modules': list(src), 'nro': has_nro, 'capstone': cs_ver,
+                       'env': {k: mods.get(k) for k in ('DM_GAME', 'DM_PATCH_FRONT')}, 'profile': own,
+                       'extra_patches': [f'{p.parent.name}/{p.name}' for p in extra_patches]}, sort_keys=True).encode()
+    key = digest(extra_patches + list(src.values()) + ([nro] if has_nro else []), meta)[:16]
+    dst = game_root(g) / 'patched' / key / g.patched.name
+    if modules_complete(dst, src, has_nro): return dst, key
+    tmp = dst.with_name(f'{dst.name}.partial.{os.getpid()}')
+    shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir(parents=True)
+    if has_nro: shutil.copyfile(nro, tmp / 'nro.tsv')
     say(f'  {g.id}: rewriting {len(src)} modules with the rewriter of {tree.id}')
-    procs, todo = {}, list(src)
-    while todo or procs:
-        while todo and len(procs) < jobs:
-            m = todo.pop(0); f = open(dst / f'rewrite_{m}.log', 'w')
-            procs[m] = (subprocess.Popen([sys.executable, str(tree.path / 'dm/tools/patch_nso.py'), str(src[m]), str(dst), m], env=mods, stdout=f, stderr=subprocess.STDOUT), f)
-        for m in [m for m, (p, _) in procs.items() if p.poll() is not None]:
-            p, f = procs.pop(m); f.close()
-            if p.returncode: raise HarnessError(f'{g.id}: patch_nso.py of {tree.id} failed on {m} (see {dst / f"rewrite_{m}.log"})')
-        time.sleep(0.2)
-    (dst / '.done').write_text('')
+    groups, todo, stop_sig = {}, list(src), signal.SIGTERM
+    try:
+        while todo or groups:
+            while todo and len(groups) < jobs:
+                m = todo.pop(0); f = open(tmp / f'rewrite_{m}.log', 'w')
+                try:
+                    grp = proc_group.Group([sys.executable, str(tree.path / 'dm/tools/patch_nso.py'), str(src[m]), str(tmp), m], env=mods, stdout=f, stderr=subprocess.STDOUT)
+                except BaseException:
+                    f.close(); raise
+                groups[m] = (grp, f)
+            for m in [m for m, (grp, _) in groups.items() if grp.p.poll() is not None]:
+                grp, f = groups[m]
+                if grp.p.returncode:
+                    raise HarnessError(f'{g.id}: patch_nso.py of {tree.id} failed on {m} (see {tmp / f"rewrite_{m}.log"})')
+                groups.pop(m)
+                try:
+                    rc = grp.finish()
+                    if grp.stragglers:
+                        msg = f'[RED] patch_nso.py exited, but {proc_group.describe(grp.stragglers)} still ran {grp.drain:g} s later and was stopped: what it writes may be incomplete\n'
+                        os.write(f.fileno(), msg.encode())
+                except BaseException:
+                    groups[m] = (grp, f); raise
+                finally:
+                    if m not in groups: f.close()
+                if rc or grp.stragglers:
+                    raise HarnessError(f'{g.id}: patch_nso.py of {tree.id} failed on {m} (see {tmp / f"rewrite_{m}.log"})')
+            if todo or groups: time.sleep(0.2)
+    except KeyboardInterrupt:
+        stop_sig = signal.SIGINT; raise
+    finally:
+        try:
+            proc_group.stop_all([grp for grp, _ in groups.values()], stop_sig)
+        finally:
+            for _, f in groups.values(): f.close()
+    (tmp / '.done').write_text('')
+    if dst.exists():
+        if modules_complete(dst, src, has_nro):
+            shutil.rmtree(tmp, ignore_errors=True)
+            return dst, key
+        shutil.rmtree(dst, ignore_errors=True)
+    try:
+        tmp.rename(dst)
+    except OSError:
+        if modules_complete(dst, src, has_nro):
+            shutil.rmtree(tmp, ignore_errors=True)
+            return dst, key
+        raise
     return dst, key
 
 
 # ---------------------------------------------------------------- the measuring lock and the Mac's load
-
-def pid_alive(pid):
-    try: os.kill(pid, 0); return True
-    except ProcessLookupError: return False
-    except PermissionError: return True
-
-
-def own_tree():
-    me, kids = os.getpid(), set()
-    r = sh(['ps', '-axo', 'pid=,ppid='])
-    par = collections.defaultdict(list)
-    for ln in r.stdout.splitlines():
-        a = ln.split()
-        if len(a) == 2: par[int(a[1])].append(int(a[0]))
-    todo = [me]
-    while todo:
-        p = todo.pop(); kids.add(p); todo += par.get(p, [])
-    return kids
-
 
 def heavy_jobs():   # other builds now running: not this process's, not stopped, not another regress.py's (whose builds pause while the measuring lock is held)
     r = sh(['ps', '-axo', 'pid=,ppid=,stat=,%cpu=,command=']); out = []; rows = {}
@@ -1078,7 +1202,6 @@ def run_env(g, art, route, outdir, a):
     if g.kind == 'nvn':
         env.update(DM_NVN_SHMAP=str(prof / 'shader_map.tsv'), DM_NVN_TSV=str(outdir / 'frames.tsv'), DM_NVN_TSV_CALLS='0')
         if not (prof / 'pso_pairs.tsv').is_file() and (g.build / 'shader/pso_pairs.tsv').is_file(): env['DM_PSO_PAIRS'] = str(g.build / 'shader/pso_pairs.tsv')
-        if not (prof / 'mesh_pairs.tsv').is_file() and (g.build / 'shader/mesh_pairs.tsv').is_file(): env['DM_MESH_PAIRS'] = str(g.build / 'shader/mesh_pairs.tsv')
     if (g.build / 'aoc').is_dir(): env['DM_AOC_DIR'] = str(g.build / 'aoc')
     for kv in a.env: k, _, v = kv.partition('='); env[k] = v
     try: run_saves.cloud_off(env, run_saves.asked(a.env))   # last, after every override: cloud saves off (dm/tools/run_saves.py)
@@ -1373,7 +1496,8 @@ def cmd_baseline(a):
             (bd / 'chain.json').write_text(json.dumps({'key': m['key']}))
             gr['chain'] = {'kind': m['kind'], 'baseline': build_summary(m)}
             if m['failed']: gr['known'].append(f"{m['failed']} of {m['total']} shaders do not build")
-            if m.get('build_failed'): gr['known'].append('Vulkan shader build failed')
+            if m.get('build_failed'):
+                gr['known'].append(f"{'GL' if m['kind'] == 'nvn' else m['kind'].upper()} shader build failed")
             if m.get('interface', {}).get('bad'):
                 bad = m['interface']['bad']; gr['chain']['interface'] = {'baseline': len(bad), 'checked': m['interface']['checked'], 'known': bad[:50]}
                 gr['status'] = 'NEW-FAIL'; gr['reasons'].append(f'{len(bad)} pipeline bases whose pixel shader reads an output the vertex shader does not write (metal-tt refuses the archive)')
@@ -1416,7 +1540,8 @@ def cmd_check(a, smoke=True):
             cd = chain_diff(bm, cm)
             gr['chain'] = {'kind': cm['kind'], 'baseline': build_summary(bm), 'candidate': build_summary(cm), **cd}
             if cm.get('build_failed'):
-                (gr['known'] if bm.get('build_failed') else levels['NEW-FAIL']).append(f'{cm["kind"].upper()} shader build failed')
+                label = 'GL' if cm['kind'] == 'nvn' else cm['kind'].upper()
+                (gr['known'] if bm.get('build_failed') else levels['NEW-FAIL']).append(f'{label} shader build failed')
             if cd['newly_failing']: levels['NEW-FAIL'].append(f"{len(cd['newly_failing'])} shaders newly fail to build (shader_regressions.py's rule)")
             if cd['added_failing']: levels['NEW-FAIL'].append(f"{len(cd['added_failing'])} shaders new in the candidate fail to build")
             both = cm['failed'] - len(cd['newly_failing']) - len(cd['added_failing'])
@@ -1650,6 +1775,7 @@ def cmd_usage(a):
             if run_failures(res, route): say(f'    [RED] the run failed ({"; ".join(run_failures(res, route))}): its usage rows are incomplete')
             rows.update(usage.runtime_usage(d, g.kind if g.kind != 'vk' else 'vulkan'))
         else: rows['api', g.kind if g.kind != 'vk' else 'vulkan'] = 1
+        if gl_capture_wanted(g, tree): rows['api', 'gl'] = 1
         out = ROOT / g.id / 'usage' / f'{tree.id}.tsv'; out.parent.mkdir(parents=True, exist_ok=True)
         head = f'{g.name} ({g.id}), revision {tree.commit[:12]}, chain {art["manifest"]["chain"]}, ' + (f'route smoke.tsv quick ({route["quick"]:g} s)' if route and not a.no_smoke else 'no run')
         usage.write_manifest(out, rows, head)
