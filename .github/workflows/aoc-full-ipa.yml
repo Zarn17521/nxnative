@@ -54,6 +54,11 @@ jobs:
           test -f "dm/games/$GAME/game.tsv"
           grep -q $'package\tv327680' "dm/games/$GAME/game.tsv"
 
+      - name: Set up compatible Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
       - name: Install original build dependencies
         shell: bash
         run: |
@@ -62,6 +67,7 @@ jobs:
           command -v xcodegen || brew install xcodegen
           brew list zstd >/dev/null 2>&1 || brew install zstd
           brew list glslang >/dev/null 2>&1 || brew install glslang
+          python3 --version
           python3 -m venv "$RUNNER_TEMP/aoc-venv"
           "$RUNNER_TEMP/aoc-venv/bin/python" -m pip install lz4 "capstone>=5,<6" fonttools nsz zbic backports.zstd gdown google-auth requests
           echo "$RUNNER_TEMP/aoc-venv/bin" >> "$GITHUB_PATH"
