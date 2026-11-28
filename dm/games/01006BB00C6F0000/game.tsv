@@ -14,6 +14,16 @@ name	The Legend of Zelda: Link's Awakening
 ipa	ZeldaLinksAwakening.ipa
 app_category	public.app-category.adventure-games
 
+# ---- Graphics (experimental A16 No-BC defaults) ----
+# Prefer the game's native 720p handheld rendering on A16; docked remains selectable.
+# Present snapshots reduce swapchain stalls, and Metal 4 enables device-side pipeline
+# caching/hybrid prebuild. Both are selectable in the launcher; A16 testing is pending.
+# For an A16 IPA use --gpu none until the exact offline compiler target is verified;
+# the device builds its own archive rather than packing the default A19 archive.
+op_mode	handheld
+present_snap	on
+pso_mtl4	on
+
 # ---- Versions ----
 # only the merged 1.1.0 copy is extracted; the base game's own build IDs are added when needed
 build	v131072	1.1.0	main=909e904af78ac1b8deefe97ab2ccdb51	subsdk0=c8a3cc0b1d1858330a881c0c2fc87940	subsdk1=8df876f80ce4ceee62360b31405c452f	sdk=3ae34e689d7a35f13cbf42bfd672af8b
