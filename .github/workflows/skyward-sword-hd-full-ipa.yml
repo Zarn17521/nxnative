@@ -117,13 +117,14 @@ jobs:
                   raise RuntimeError(f"{env}: empty download")
               print(f"{env}: downloaded {destination.stat().st_size:,} bytes")
 
+          # Check the small private keys file first, using the same authenticated
+          # Drive downloader as the game files. Fail before large downloads if
+          # the service account cannot access it.
+          key_file = root / "sshd-keys" / "prod.keys"
+          download_drive("KEYS_URL", key_file)
+          key_file.chmod(0o600)
           download_drive("BASE_URL", root / "sshd-input" / "SSHD [01002DA013484000][v0].nsp")
           download_drive("UPDATE_URL", root / "sshd-input" / "SSHD [01002DA013484800][v65536].nsp")
-          key_file = root / "sshd-keys" / "prod.keys"
-          subprocess.run(["gdown", "--output", str(key_file), os.environ["KEYS_URL"]], check=True)
-          if not key_file.is_file() or key_file.stat().st_size == 0:
-              raise RuntimeError("KEYS_URL: empty download")
-          key_file.chmod(0o600)
           PY
 
       - name: Build No-BC with guarded 2x support
