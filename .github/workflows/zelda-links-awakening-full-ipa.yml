@@ -89,7 +89,7 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-      - name: Inspect merged 1.1.0 game modules (metadata only)
+      - name: Check 1.1.0 performance patch reference sites (read-only)
         id: diagnose
         if: ${{ always() && steps.build.outcome != 'skipped' }}
         shell: bash
@@ -132,10 +132,41 @@ jobs:
               except (ValueError, OSError) as e:
                   report["modules"][name] = {"status": "parse error", "error_type": type(e).__name__}
           report["all_build_ids_match"] = all(v.get("matches", False) for v in report["modules"].values())
+          # Reference: LASRecomp (MIT), runtime/game_addresses/patches_v1_0_1.h
+          # and tools/patches.py. These are candidate sites, not Nxnative patches.
+          # Do not export executable bytes or apply modifications.
+          sites = {
+              "frame_interval_read": (0xC954, 0xB8696908),
+              "dynamic_resolution_enable_read": (0xC938, 0x395922E8),
+              "dynamic_resolution_initial_level_read": (0x107CD38, 0xB86D698C),
+              "tilt_shift_object_init": (0x10712F0, 0xD10243FF),
+          }
+          report["reference"] = "https://github.com/peiikai/LASRecomp/blob/main/runtime/game_addresses/patches_v1_0_1.h"
+          report["candidate_site_checks"] = {}
+          main = exefs / "main"
+          if report["modules"].get("main", {}).get("matches") and main.is_file():
+              module = nso.load(main.read_bytes(), "main")
+              text_start, text_size = module.segments[0]
+              for name, (offset, expected_word) in sites.items():
+                  in_text = text_start <= offset and offset + 4 <= text_start + text_size
+                  matches = in_text and int.from_bytes(
+                      module.image[offset:offset + 4], "little") == expected_word
+                  report["candidate_site_checks"][name] = {
+                      "offset": hex(offset), "in_text": in_text,
+                      "matches_reference": matches,
+                  }
+          report["feature_status"] = {
+              "stable_30_fps": "requires game timer and presentation pacing validation",
+              "render_scale": "requires render-target and dependent viewport validation",
+              "blur_off": "requires tilt-shift parameter lifetime and rendering validation",
+              "shadow_1024": "no verified patch site; requires shadow target and sampling validation",
+          }
+          print("Candidate sites:", report["candidate_site_checks"])
+
           out = root / "zelda-report" / "game-code-report.json"
           out.write_text(json.dumps(report, indent=2) + "\n")
           print("Module build IDs match:", report["all_build_ids_match"])
-          print("Report contains metadata and imported API names only.")
+          print("Report contains module metadata, imported API names and candidate-site match results only.")
           PY
 
       - name: Upload game-code diagnostic report
