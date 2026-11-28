@@ -34,5 +34,7 @@ shader_groups	/Stage/=stage /Sound/=sound /EU/=eu /Layout/=layout /Shaders/=shad
 shader_note	The Legend of Zelda: Skyward Sword HD shaders
 
 # ---- Graphics ----
+# Resolution table metadata gates the experimental 1x/2x launcher slider.
+render_base	1920x1080 1280x720
 # the game's last nvnDeviceSetDepthMode at boot is near = 0
 depth_mode	zero

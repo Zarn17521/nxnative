@@ -127,6 +127,9 @@ def build(gid, patched, control, other_programs=()):
             lo, hi, st = (float(x) for x in values.split(':'))
             if var == 'DM_RENDER_SCALE' and keys.get('RENDER_SCALE', '1') != '1':   # a stub that also raises the size: up to its largest scale (the rewriter's RENDER_SCALE, hex as every header value)
                 hi = float(int(keys['RENDER_SCALE'], 16))
+            if var == 'DM_RENDER_SCALE' and all('SKYWARD_RES_' + str(i) in keys for i in range(3)):
+                lo, hi, st = 1.0, 2.0, 1.0   # only the original and reference 2x table
+                s['note'] = 'Experimental 2x: higher GPU and memory use; restart the game to apply.'
             s.update(min=lo, max=hi, step=st)
         elif kind == 'toggle':
             if s['default'] not in ('0', '1'): sys.exit(f'settings.tsv:{n}: a toggle defaults to 0 or 1: {s["default"]}')

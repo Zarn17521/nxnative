@@ -399,6 +399,10 @@ static int parse_hex_bytes(const char *s, uint8_t *out, size_t n) {
     return 1;
 }
 
+// Skyward Sword HD v1.0.1 data-only resolution table. The rewriter exports
+// these offsets only after checking the original bytes and writable layout.
+static module_t *g_skyward_res_mod;
+static uint64_t g_skyward_res_off[3];
 static void read_layout(module_t *m, const char *dir) {
     char path[1024]; snprintf(path, sizeof path, "%s/%s.fixups.tsv", dir, m->name);
     FILE *f = fopen(path, "r");
@@ -419,6 +423,11 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
         else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
+        else if (!strcmp(key, "SKYWARD_RES_0") || !strcmp(key, "SKYWARD_RES_1") || !strcmp(key, "SKYWARD_RES_2")) {
+            if (strcmp(m->name, "main") || (g_skyward_res_mod && g_skyward_res_mod != m)) die("%s: unexpected Skyward resolution metadata", path);
+            g_skyward_res_mod = m;
+            g_skyward_res_off[key[12] - '0'] = v;
+        }
         else if (!strcmp(key, "MOVIE_NATIVE_COLOR_KEYS")) m->movie_native_color_keys = v == 1;
         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
         else if (!strcmp(key, "FRAME_STEP_120")) m->fstep_t120 = v != 0;
@@ -489,7 +498,39 @@ static void install_fps_state(module_t *m) {
 }
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
+static void skyward_resolution_apply(void) {
+    module_t *m = g_skyward_res_mod;
+    if (!m || strcmp(m->build_id, "5441af3c89f97e1d25a8ccf14c742bf8")) return;
+    const char *rs = getenv("DM_RENDER_SCALE");
+    char *end = NULL;
+    float scale = rs ? strtof(rs, &end) : 1.0f;
+    if (rs && (end == rs || *end || (scale != 1.0f && scale != 2.0f))) {
+        LOG("[RED] Skyward Sword HD DM_RENDER_SCALE must be 1 or 2; keeping original size");
+        return;
+    }
+    if (scale == 1.0f) return;
+    static const uint32_t original[3][2] = {{1280,720}, {1920,1080}, {1920,1080}};
+    static const uint32_t doubled[3][2] = {{2560,1440}, {3840,2160}, {3840,2160}};
+    const uint64_t rw_start = (m->text_end + 0x3fffull) & ~0x3fffull;
+    const uint64_t rw_end = m->patch_off < 0 ? m->file_image_len : m->key_page_off;
+    // All-or-nothing: never write an executable page, an unknown table, or a
+    // partly matching build. The launcher calls this before guest execution.
+    for (unsigned i = 0; i < 3; i++) {
+        uint64_t off = g_skyward_res_off[i];
+        if (!m->base || off < rw_start || off > rw_end || rw_end - off < 8 ||
+            off > m->size || m->size - off < 8 ||
+            memcmp(m->base + off, original[i], sizeof original[i])) {
+            LOG("[RED] Skyward Sword HD resolution table mismatch; keeping original size");
+            return;
+        }
+    }
+    for (unsigned i = 0; i < 3; i++)
+        memcpy(m->base + g_skyward_res_off[i], doubled[i], sizeof doubled[i]);
+    LOG("Skyward Sword HD: DM_RENDER_SCALE=2, resolution table 2560x1440 handheld / 3840x2160 docked (experimental)");
+}
+
 void dm_fps_state_apply(void) {
+    skyward_resolution_apply();
     if (!dm_fps_state) return;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
     // The step's unit, before the target: 120 (ticks of 1/120 s) for a stub that takes them, fixed for the run (nvn_fstep.h FSTEP_UNIT_OFF); 0 = vsyncs of 1/60 s

@@ -36,6 +36,7 @@ src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
 # An NSO, or an NRO (a module the game loads at run time with nn::ro, Super Smash Bros. Ultimate's fighter code), rewritten as an NSO of the same layout would be. nso.py checks the file
 # against its header before anything is allocated (a damaged module stops here with a [RED] line)
 MOD = nso.cli_read(src)
+_original_data_off = MOD.segments[2][0]
 ORIG_TEXT = bytes(MOD.image[:MOD.text_end])   # the text as the file has it, before any relayout, cut or site: <name>.changed.tsv compares against it
 # Horizon maps modules at 4 KB, Apple hosts at 16 KB (W^X / signed __TEXT): move writable data up by whole 4 KB pages when it would share the code's 16 KB page (mod_layout.py)
 try: MOD, _relayout_D, _relayout_notes = mod_layout.relayout_module(MOD)
@@ -144,6 +145,25 @@ def load_patches():
     return tables, where
 PATCHES, PATCH_WHERE = load_patches()
 BUILD_ID = MOD.build_id[:0x10].hex()
+# Skyward Sword HD 1.0.1: resolution table locations from KeatonTheBot's
+# community 4K/2K patch (Kenji-NX/switch-pchtxt-mods, 4K/exefs/1.0.1.pchtxt).
+# Validate all original dimension pairs in the rewritten data before advertising
+# the launcher control. No code or game data is changed by the rewriter here.
+SKYWARD_RES = ()
+if NAME == 'main' and BUILD_ID == '5441af3c89f97e1d25a8ccf14c742bf8':
+    original = ((0x13A915C, 1280, 720), (0x13A916C, 1920, 1080), (0x16CAC94, 1920, 1080))
+    candidates = tuple((off + (_relayout_D if off >= _original_data_off else 0), w, h)
+                       for off, w, h in original)
+    # Apple code pages are immutable. Require every pair to sit in a data segment
+    # outside the aligned executable region (not in padding, BSS, or patch pages).
+    if all(off >= ((TEXT_END + 0x3fff) & ~0x3fff)
+           and any(seg <= off and off + 8 <= seg + size for seg, size in MOD.segments[1:])
+           and bytes(IMG[off:off + 8]) == struct.pack('<II', w, h)
+           for off, w, h in candidates):
+        SKYWARD_RES = candidates
+        print('main: Skyward Sword HD resolution table verified (1x/2x)')
+    else:
+        print('[RED] main: Skyward Sword HD resolution table did not match; keeping original size')
 cuts = list(PATCHES['CUTS'].get(BUILD_ID, []))
 ALIAS_OFFS = set(PATCHES['ALIAS_CUTS'].get(BUILD_ID, ()))
 assert ALIAS_OFFS <= {c[0] for c in PATCHES['CUTS'].get(BUILD_ID, [])}, f'ALIAS_CUTS of build {BUILD_ID} name offsets that are not among its CUTS: {sorted(ALIAS_OFFS - {c[0] for c in PATCHES["CUTS"].get(BUILD_ID, [])})}'
@@ -1972,6 +1992,12 @@ with open(P('fixups.tsv'), 'w') as f:
     if 'qs' in UNITY_FPS: f.write(''.join(f'# UNITY_QS_{k}\t{v:#x}\n' for k, v in zip(('PTR', 'IDX', 'ARR', 'SIZE', 'VSYNC'), UNITY_FPS['qs'])))   # its QualitySettings' vSyncCount (unity_fps.py)
     if movie_native_color_keys(): f.write('# MOVIE_NATIVE_COLOR_KEYS\t0x1\n')
     for n, o in UE_CVARS.items(): f.write(f'# UE_CVAR:{n}\t{o:#x}\n')   # Unreal console variables (ue_cvar.py): the TAutoConsoleVariable registered under each name
+    if SKYWARD_RES:
+        assert not RENDER_SCALE, 'two render scale implementations'
+        f.write('# RENDER_SCALE\t2\n')
+        for i, (off, w, h) in enumerate(SKYWARD_RES):
+            assert bytes(IMG[off:off + 8]) == struct.pack('<II', w, h)
+            f.write(f'# SKYWARD_RES_{i}\t{off:#x}\n')
     if RENDER_SCALE:   # a render-scale stub reads state +0x10, up to this scale (the loader holds DM_RENDER_SCALE to it; dm/games/settings.py offers the setting up to it)
         assert isinstance(RENDER_SCALE, int) and 1 <= RENDER_SCALE <= 9, f'render scale stub: ctx.render_scale is a whole largest scale, 1 to 9: {RENDER_SCALE!r}'
         f.write(f'# RENDER_SCALE\t{RENDER_SCALE}\n')

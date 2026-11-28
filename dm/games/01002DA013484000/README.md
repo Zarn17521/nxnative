@@ -9,7 +9,7 @@ Update 1.0.1 (v65536) over the base game, SDK 11.4.0. Nintendo's Wii-era engine,
 | `depth_mode zero` | [`game.tsv`](game.tsv) | the game's last `nvnDeviceSetDepthMode` at boot is near = 0, so the pipeline bases made before it runs take the `main0_z` vertex entries |
 | 4 GB layout: `mem_reserve 0xd0000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | no system resource in the NPDM: the game uses `SetHeapSize`, 696 MB of bss, so a 2.5 GB heap region (it takes 2.46 GB) |
 
-No rewriter cuts of its own, no `patches.py`.
+No executable rewriter cuts of its own, no `patches.py`. Experimental 1x/2x resolution control is data-only: the rewriter validates all three original resolution pairs for main build `5441af3c89f97e1d25a8ccf14c742bf8` before exposing `DM_RENDER_SCALE`. The loader checks them again before writing 2560x1440 handheld / 3840x2160 docked. Default 1x leaves the original table unchanged; no change to FPS, texture conversion or memory policy. Reference: [KeatonTheBot's 1.0.1 4K/2K patch](https://github.com/Kenji-NX/switch-pchtxt-mods/blob/main/Legend%20of%20Zelda%2C%20The%20-%20Skyward%20Sword%20HD/01002DA013484000/4K/exefs/1.0.1.pchtxt). Device validation is pending; if the table does not match, the control is not advertised.
 
 ## Rendering
 
