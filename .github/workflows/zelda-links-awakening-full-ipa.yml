@@ -18,11 +18,10 @@ jobs:
       UPDATE_URL: ${{ secrets.ZELDA_UPDATE_URL }}
       KEYS_URL: ${{ secrets.ZELDA_KEYS_URL }}
     steps:
-      - name: Checkout original No-BC fork
+      - name: Checkout selected No-BC fork revision
         uses: actions/checkout@v4
         with:
-          repository: mianmuhammadse/nxnative
-          ref: no-bc
+          ref: ${{ github.sha }}
           submodules: recursive
           persist-credentials: false
 
@@ -33,6 +32,7 @@ jobs:
           test -n "$BASE_URL" || { echo "::error::Missing ZELDA_BASE_URL"; exit 1; }
           test -n "$UPDATE_URL" || { echo "::error::Missing ZELDA_UPDATE_URL"; exit 1; }
           test -n "$KEYS_URL" || { echo "::error::Missing ZELDA_KEYS_URL"; exit 1; }
+          test "$GITHUB_REF_NAME" = no-bc || { echo "::error::Select the no-bc branch"; exit 1; }
           test -f "dm/games/$GAME/game.tsv"
           grep -q $'package\tv131072' "dm/games/$GAME/game.tsv"
 
@@ -69,14 +69,15 @@ jobs:
           (root / "zelda-keys" / "prod.keys").chmod(0o600)
           PY
 
-      - name: Build with untouched upstream No-BC defaults
+      - name: Build A16 No-BC IPA with device pipeline cache
         id: build
         shell: bash
         run: |
           set -euo pipefail
           git rev-parse HEAD
           python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/zelda-input" \
-            -k "$RUNNER_TEMP/zelda-keys/prod.keys"
+            -k "$RUNNER_TEMP/zelda-keys/prod.keys" \
+            --package v131072 --gpu none --keep-extracted
           git diff --exit-code
 
       - name: Upload full IPA (even if verification fails)
@@ -85,6 +86,64 @@ jobs:
         with:
           name: ZeldaLinksAwakening-NoBC-FullIPA
           path: ${{ runner.temp }}/zelda-input/*.ipa
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Inspect merged 1.1.0 game modules (metadata only)
+        id: diagnose
+        if: ${{ always() && steps.build.outcome != 'skipped' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/zelda-report"
+          python3 - <<'PY'
+          import hashlib, json, os, re, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path("dm/tools").resolve()))
+          import nso, nso_syms
+          root = Path(os.environ["RUNNER_TEMP"])
+          exefs = root / "zelda-input" / "01006BB00C6F0000_build" / "extract" / "v131072" / "ExeFS"
+          expected = {
+              "main": "909e904af78ac1b8deefe97ab2ccdb51",
+              "subsdk0": "c8a3cc0b1d1858330a881c0c2fc87940",
+              "subsdk1": "8df876f80ce4ceee62360b31405c452f",
+              "sdk": "3ae34e689d7a35f13cbf42bfd672af8b",
+          }
+          report = {"title_id": "01006BB00C6F0000", "package": "v131072",
+                    "commit": os.environ["GITHUB_SHA"], "modules": {},
+                    "status": "metadata only; no binary patch validated"}
+          for name, build_id in expected.items():
+              p = exefs / name
+              if not p.is_file():
+                  report["modules"][name] = {"status": "not extracted"}
+                  continue
+              raw = p.read_bytes()
+              try:
+                  m = nso.load(raw, name)
+                  actual = m.build_id[:16].hex()
+                  imports = [s for s, defined, _ in nso_syms.dynsyms(bytes(m.image)) if not defined]
+                  report["modules"][name] = {
+                      "build_id": actual, "expected_build_id": build_id,
+                      "matches": actual == build_id, "sha256": hashlib.sha256(raw).hexdigest(),
+                      "file_bytes": len(raw),
+                      "candidate_imports": sorted(set(s for s in imports if re.search(
+                          r"Vsync|PresentInterval|FrameRate|Tick|Texture|Viewport|WindowCrop|Resolution|Shadow|DepthOfField", s, re.I))),
+                  }
+              except (ValueError, OSError) as e:
+                  report["modules"][name] = {"status": "parse error", "error_type": type(e).__name__}
+          report["all_build_ids_match"] = all(v.get("matches", False) for v in report["modules"].values())
+          out = root / "zelda-report" / "game-code-report.json"
+          out.write_text(json.dumps(report, indent=2) + "\n")
+          print("Module build IDs match:", report["all_build_ids_match"])
+          print("Report contains metadata and imported API names only.")
+          PY
+
+      - name: Upload game-code diagnostic report
+        if: ${{ always() && steps.diagnose.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZeldaLinksAwakening-A16-CodeReport
+          path: ${{ runner.temp }}/zelda-report/game-code-report.json
           if-no-files-found: error
           retention-days: 3
 
